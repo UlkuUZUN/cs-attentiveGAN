@@ -1,0 +1,162 @@
+import time
+import math
+
+import imageio
+import tensorflow as tf
+import numpy as np
+import matplotlib.pyplot as plt
+
+import skimage
+from skimage.measure import compare_psnr, compare_mse
+from utils import *
+from model import *
+
+from skimage import measure
+
+
+def add_pad(img):
+    npad = ((56, 56), (0, 0), (0, 0))
+    img = np.pad(img, pad_width=npad, mode='constant', constant_values=0)
+    img = np.expand_dims(img, axis=0)
+    return img
+
+
+def inverse_pad(img):
+    img = img[57:201, :, :]
+    print(img.dtype)
+    print(img.shape)
+    print(img[100, 100, 1])
+    return img
+
+
+def test(image):
+    tf.reset_default_graph()
+
+    global_step = tf.Variable(0, dtype=tf.int32, trainable=False, name='global_step')
+
+    gen_in = tf.placeholder(shape=[None, BATCH_SHAPE[1], BATCH_SHAPE[2], BATCH_SHAPE[3]], dtype=tf.float32,
+                            name='generated_image')
+    real_in = tf.placeholder(shape=[None, BATCH_SHAPE[1], BATCH_SHAPE[2], BATCH_SHAPE[3]], dtype=tf.float32,
+                             name='groundtruth_image')
+
+    Gz = generator(gen_in)
+
+    init = tf.global_variables_initializer()
+    with tf.Session() as sess:
+        sess.run(init)
+
+        saver = initialize(sess)
+        initial_step = global_step.eval()
+
+        start_time = time.time()
+        n_batches = 200
+        total_iteration = n_batches * N_EPOCHS
+
+        image = sess.run(tf.map_fn(lambda img: tf.image.per_image_standardization(img), image))
+        image = sess.run(Gz, feed_dict={gen_in: image})
+        image = np.resize(image[0][56:, :, :], [144, 256, 3])
+        imsave('test', image)
+
+        return image
+
+
+def cycle_spin(x):
+    # x = np.asanyarray(x)
+
+    all_shifts = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (-1, 0, 0), (-1, -1, 0), (0, -1, 0), (1, -1, 0), (-1, 1, 0),
+                   (2, 2, 0), (2, 0, 0), (0, 2, 0), (-2, 0, 0), (-2, -2, 0), (0, -2, 0), (2, -2, 0), (-2, 2, 0)]
+
+    # all_shifts = [(0, 0, 0),(1, 0, 0), (1, 1, 0), (0, 1, 0), (-1, 0, 0), (-1, -1, 0), (0, -1, 0), (1, -1, 0), (-1, 1, 0)]
+    # all_shifts =[(0, 0, 0), (2, 0, 0), (2, 2, 0), (0, 2, 0), (-2, 0, 0), (-2, -2, 0), (0, -2, 0), (2, -2, 0), (-2, 2, 0)]
+    #all_shifts = [(0, 0, 0), (3, 0, 0), (3, 3, 0), (0, 3, 0), (-3, 0, 0), (-3, -3, 0), (0, -3, 0), (3, -3, 0),(-3, 3, 0)]
+    #all_shifts =[(0, 0, 0), (4, 0, 0), (4, 4, 0), (0, 4, 0), (-4, 0, 0), (-4, -4, 0), (0, -4, 0),  (4, -4, 0), (-4, 4, 0)]
+    #all_shifts = [(0, 0, 0), (5, 0, 0), (5, 5, 0), (0, 5, 0), (-5, 0, 0), (-5, -5, 0), (0, -5, 0), (5, -5, 0),(-5, 5, 0)]
+
+    mean = _run_one_shift(x, all_shifts[0])
+    for shift in all_shifts[1:]:
+        mean += _run_one_shift(x, shift)
+
+
+    mean /= len(all_shifts)
+
+    xm = metrics_image.astype(np.float32) / 255.0
+    print("psnr_xm_mean=%s" % compare_psnr(xm, mean, data_range=1))
+    imsave('output', mean)
+    return mean
+
+
+def _run_one_shift(x, shift):
+    # shift, apply function, inverse shift
+    print('*****************')
+    print(shift)
+    xm = scipy.misc.imread(METRICS_SET_DIR + 'gt.png', mode='RGB')
+
+    print("psnr_xm_x=%s" % compare_psnr(xm, x, data_range=255))
+
+    xs = _roll_axes(x, shift)
+    print(xs[100, 100, 1])
+    print("psnr_xm_xs=%s" % compare_psnr(xm, xs, data_range=255))
+    imsave('aftershift%s%s%s' % shift, xs)
+
+    test(add_pad(xs.astype(np.float32) / 255.0))
+    tmp = scipy.misc.imread(IMG_DIR + 'test.png', mode='RGB')
+    print(tmp[100, 100, 1])
+    print("psnr_xm_tmp=%s" % compare_psnr(xm, tmp, data_range=255))
+    imsave('test%s%s%s' % shift, tmp)
+
+    last = _roll_axes(tmp, -np.asarray(shift))
+    print(last[100, 100, 1])
+    print("psnr_xm_last=%s" % compare_psnr(xm, last, data_range=255))
+    last = last.astype(np.float32) / 255.0
+    imsave('last%s%s%s' % shift, last)
+
+    print('*****************')
+
+    return last
+
+
+def _roll_axes(x, rolls, axes=None):
+    if axes is None:
+        axes = np.arange(len(rolls))
+
+    for r, a in zip(rolls, axes):
+        x = np.roll(x, r, a)
+    return x
+
+
+def denoise(image):
+    image = scipy.misc.imread(image, mode='RGB')
+
+    # image = scipy.misc.imread(image, mode='RGB')
+
+    # image = skimage.io.imread(image)
+    # image = imageio.imread(image)
+    # image = image.astype(np.float32) / 255.0
+
+    # npad = ((56, 56), (0, 0), (0, 0))
+    # image = np.pad(image, pad_width=npad, mode='constant', constant_values=0)
+    # image = np.expand_dims(image, axis=0)
+    # output = test(image)
+    output = cycle_spin(image)
+
+    return output
+
+
+if __name__ == '__main__':
+    image = scipy.misc.imread(sys.argv[-1], mode='RGB')
+    print(image[100, 100, 1])
+    # image = scipy.misc.imread(sys.argv[-1], mode='RGB')
+
+    # image = skimage.io.imread(sys.argv[-1])
+    # image = imageio.imread(sys.argv[-1])
+    # image = sys.argv[-1].astype(np.float32) / 255.0
+
+    npad = ((56, 56), (0, 0), (0, 0))
+    image = np.pad(image, pad_width=npad, mode='constant', constant_values=0)
+    image = np.expand_dims(image, axis=0)
+    print(image[0].shape)
+
+    image = image.astype(np.float32) / 255.0
+    print(image[100, 100, 1])
+    # test(image)
+    output = cycle_spin(image)
